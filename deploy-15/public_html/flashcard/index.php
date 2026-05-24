@@ -1,83 +1,70 @@
 <?php
 require_once __DIR__ . '/../includes/auth_check.php';
+require_once __DIR__ . '/../includes/flashcard_manager.php';
 
 /* ═══════════════════════════════════════════════════════════
    設定
 ═══════════════════════════════════════════════════════════ */
-// 同じディレクトリにある vocab.csv を読み込む
-// 複数のCSVがある場合はここを変更するか、URLパラメータで切り替え可能
 $csv_file = isset($_GET['csv']) ? basename($_GET['csv']) : 'vocab.csv';
-$csv_path = __DIR__ . '/' . $csv_file; // flashcard/ フォルダ内のCSVを参照
+$manager = new FlashcardManager($current_uid, $csv_file);
 
-// ユーザーごとの進捗データ保存先（public_html の外）
-// 進捗はユーザー × CSVファイル名 ごとに保存
-$csv_key      = preg_replace('/[^a-zA-Z0-9_]/', '_', pathinfo($csv_file, PATHINFO_FILENAME));
-$progress_file = dirname(dirname(__DIR__)) . '/momos_data/flashcard_'
-               . preg_replace('/[^a-zA-Z0-9_]/', '_', $current_uid)
-               . '_' . $csv_key . '.json';
+// データ読み込み（マイグレーション含む）
+$data = $manager->loadData();
 
 /* ═══════════════════════════════════════════════════════════
-   進捗データ（サーバー側）
+   API: POST リクエスト処理
 ═══════════════════════════════════════════════════════════ */
-function loadProgress(string $file): array {
-    if (!file_exists($file)) return [];
-    return json_decode(file_get_contents($file), true) ?? [];
-}
-function saveProgress(string $file, array $data): void {
-    file_put_contents($file, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
-}
-
-// API: 進捗の保存・取得・リセット
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['api'])) {
     header('Content-Type: application/json; charset=UTF-8');
-    $progress = loadProgress($progress_file);
-    $action   = $_POST['api'];
+    
+    $action = $_POST['api'];
+    $word   = $_POST['word'] ?? '';
+    $mode   = $_POST['mode'] ?? 'order';
+    $index  = isset($_POST['index']) ? (int)$_POST['index'] : 0;
 
-    if ($action === 'mark') {
-        $word   = $_POST['word'] ?? '';
-        $status = $_POST['status'] ?? ''; // 'ok' | 'ng'
+    if ($action === 'mark_learned') {
+        // 「覚えた」を選択
         if ($word) {
-            $progress[$word] = [
-                'status'  => $status,
-                'updated' => date('Y-m-d H:i:s'),
-            ];
-            saveProgress($progress_file, $progress);
+            $data = $manager->markAsLearned($word, $data);
+            $manager->saveData($data);
         }
+        echo json_encode(['ok' => true, 'stats' => $manager->getStats($data)]);
+
+    } elseif ($action === 'mark_review') {
+        // 「要復習」を選択
+        if ($word) {
+            $data = $manager->markAsReview($word, $data);
+            $manager->saveData($data);
+        }
+        echo json_encode(['ok' => true, 'stats' => $manager->getStats($data)]);
+
+    } elseif ($action === 'save_session') {
+        // セッション位置を保存（次回の「続きから」用）
+        $data = $manager->saveLastSession($data, $mode, $index);
+        $manager->saveData($data);
         echo json_encode(['ok' => true]);
 
     } elseif ($action === 'reset') {
-        saveProgress($progress_file, []);
+        // 進捗をリセット
+        $data = $manager->resetProgress($data);
+        $manager->saveData($data);
         echo json_encode(['ok' => true]);
 
-    } elseif ($action === 'get') {
-        echo json_encode($progress);
+    } elseif ($action === 'get_data') {
+        // 最新データを取得
+        echo json_encode($data);
     }
+
     exit;
 }
 
 /* ═══════════════════════════════════════════════════════════
-   CSVを読み込んでPHPでJSONに変換（PHPで一度だけ処理）
+   ページレンダリング用データ
 ═══════════════════════════════════════════════════════════ */
-$vocab = [];
-if (file_exists($csv_path)) {
-    if (($fh = fopen($csv_path, 'r')) !== false) {
-        // BOM除去
-        $bom = fread($fh, 3);
-        if ($bom !== "\xEF\xBB\xBF") rewind($fh);
-        while (($row = fgetcsv($fh)) !== false) {
-            if (count($row) < 2 || trim($row[0]) === '') continue;
-            $vocab[] = [
-                'word'    => trim($row[0]),
-                'meaning' => trim($row[1] ?? ''),
-                'chunk'   => trim($row[2] ?? ''),
-            ];
-        }
-        fclose($fh);
-    }
-}
+$stats = $manager->getStats($data);
+$lastSession = $manager->getLastSession($data);
 
-$vocab_json    = json_encode($vocab, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT);
-$progress_json = json_encode(loadProgress($progress_file), JSON_UNESCAPED_UNICODE);
+$data_json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
 <!DOCTYPE html>
 <html lang="ja">
@@ -184,7 +171,7 @@ header {
 .card-scene { width: 100%; max-width: 680px; perspective: 1200px; flex-shrink: 0; }
 .card-wrap {
   position: relative; width: 100%;
-  padding-top: min(60%, 340px); /* aspect ratio box */
+  padding-top: min(60%, 340px);
   cursor: pointer;
   transform-style: preserve-3d;
   transition: transform .55s cubic-bezier(0.4, 0, 0.2, 1);
@@ -215,7 +202,6 @@ header {
   content: ''; position: absolute; top: -1px; left: 15%; right: 15%;
   height: 2px; background: linear-gradient(to right, transparent, var(--gl), transparent);
 }
-/* Card badge */
 .card-badge {
   position: absolute; top: .9rem; left: 1.1rem;
   font-size: .64rem; letter-spacing: .18em; text-transform: uppercase;
@@ -223,12 +209,10 @@ header {
 }
 .card-front .card-badge { background: rgba(184,150,12,.12); color: var(--gold); border: 1px solid rgba(184,150,12,.25); }
 .card-back  .card-badge { background: rgba(76,175,133,.12); color: var(--gl);   border: 1px solid rgba(76,175,133,.25); }
-/* Hint text */
 .card-hint {
   position: absolute; bottom: .9rem;
   font-size: .72rem; color: rgba(140,128,112,.5); letter-spacing: .1em;
 }
-/* Card content */
 .front-word {
   font-family: 'Playfair Display', serif;
   font-size: clamp(2rem, 6vw, 3.5rem);
@@ -274,7 +258,6 @@ header {
 .btn-ng:hover     { background: rgba(200,16,46,.25); transform: translateY(-1px); }
 .action-btn:disabled { opacity: .3; cursor: not-allowed; transform: none; }
 
-/* Flash animation for key press */
 .action-btn.flash { transform: scale(.95); }
 
 /* ── RESULT SCREEN ── */
@@ -298,7 +281,6 @@ header {
 .result-stat .l { font-size: .8rem; color: var(--fog); letter-spacing: .1em; }
 .result-stat.green .n { color: var(--gl); }
 .result-stat.red-c .n  { color: #e87a8a; }
-/* NG words list */
 .ng-list { text-align: left; background: rgba(200,16,46,.06); border: 1px solid rgba(200,16,46,.15); border-radius: 2px; padding: .8rem 1rem; margin-bottom: 1.4rem; max-height: 180px; overflow-y: auto; }
 .ng-list li { font-size: .92rem; color: var(--mist); padding: .18rem 0; border-bottom: 1px solid rgba(255,255,255,.04); }
 .ng-list li:last-child { border-bottom: none; }
@@ -314,11 +296,9 @@ header {
 
 @keyframes fadeIn { from { opacity:0; transform: translateY(16px); } to { opacity:1; } }
 
-/* ── EMPTY STATE ── */
 .empty-state { text-align: center; padding: 3rem 2rem; color: var(--fog); }
 .empty-state .icon { font-size: 2.5rem; display: block; margin-bottom: .8rem; }
 
-/* ── MOBILE ── */
 @media (max-width: 560px) {
   header { padding: .8rem 1rem; }
   #study-screen { padding: 1rem 1rem 1.5rem; }
@@ -332,7 +312,7 @@ header {
 <body>
 
 <header>
-  <a href="/index.php" class="site-title">Momo's <em>London</em></a>
+   <a href="/index.php" class="site-title"><img src="../images/ML-logo1s.png" width=25% align="top" style="margin: 0px 0px;"> Flash<em>card</em></a>
   <div class="hdr-r">
     <span id="hdr-csv" style="font-size:.75rem;color:var(--fog)"></span>
     <a href="/index.php" class="btn-sm">← Contents</a>
@@ -343,7 +323,7 @@ header {
 <!-- ═══════════════ SETUP SCREEN ═══════════════ -->
 <div id="setup-screen">
   <div class="setup-card">
-    <h2 class="setup-title">Flashcard <em>Study</em></h2>
+    <h2 class="setup-title">Flash<em>card</em></h2>
     <p class="setup-meta" id="setup-meta">読み込み中...</p>
 
     <!-- 進捗サマリー -->
@@ -361,7 +341,7 @@ header {
         <span class="mode-label">ランダム</span>
         <span class="mode-sub">シャッフル</span>
       </div>
-      <div class="mode-btn" data-mode="ng" onclick="selectMode(this)" id="mode-ng-btn">
+      <div class="mode-btn" data-mode="review_only" onclick="selectMode(this)" id="mode-ng-btn">
         <span class="mode-icon">❓</span>
         <span class="mode-label">要復習のみ</span>
         <span class="mode-sub" id="ng-count-sub">0語</span>
@@ -396,7 +376,7 @@ header {
     <!-- リセット -->
     <div style="text-align:center;margin-top:1.1rem">
       <button onclick="resetProgress()" style="background:none;border:none;font-size:.8rem;color:var(--fog);cursor:pointer;font-family:'EB Garamond',serif;text-decoration:underline;text-underline-offset:2px">
-        🔄 このリストの学習履歴をリセット（他はリセットされません）
+        🔄 このリストの学習履歴をリセット
       </button>
     </div>
   </div>
@@ -442,11 +422,11 @@ header {
       <span>🔄 裏返す</span>
       <span class="key-hint">Space</span>
     </button>
-    <button class="action-btn btn-ok" id="btn-ok" onclick="markCard('ok')" disabled>
+    <button class="action-btn btn-ok" id="btn-ok" onclick="markCard('learned')" disabled>
       <span>👍 覚えていた</span>
       <span class="key-hint">A / J key</span>
     </button>
-    <button class="action-btn btn-ng" id="btn-ng" onclick="markCard('ng')" disabled>
+    <button class="action-btn btn-ng" id="btn-ng" onclick="markCard('review')" disabled>
       <span>❓ 覚えていなかった</span>
       <span class="key-hint">F key</span>
     </button>
@@ -477,52 +457,54 @@ header {
 /* ═══════════════════════════════════════════════
    データ
 ═══════════════════════════════════════════════ */
-const VOCAB    = <?= $vocab_json ?>;
-const USER_UID  = <?= json_encode($current_uid) ?>;
-const CSV_LABEL = <?= json_encode($csv_file) ?>;  // 表示用
+const FULL_DATA = <?= $data_json ?>;
+const CSV_LABEL = <?= json_encode($csv_file) ?>;
 
-let progress  = <?= $progress_json ?>;  // { word: {status, updated} }
-let deck      = [];       // 現在の学習デッキ
-let current   = 0;        // 現在のインデックス
-let isFlipped = false;    // カードが表か裏か
+let currentData = structuredClone(FULL_DATA);
+let deck      = [];
+let current   = 0;
+let isFlipped = false;
 let sessionOK = 0;
 let sessionNG = 0;
 let selectedMode = 'order';
-let reverseMode  = false;    // true = 裏面（日本語）からスタート
-let resumeMode   = true;     // true = 前回の続きから
-let lastIndex    = 0;        // 各モードの最後のインデックスを保存
+let reverseMode  = false;
+let resumeMode   = true;
 
 /* ═══════════════════════════════════════════════
    初期化
 ═══════════════════════════════════════════════ */
 window.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('hdr-csv').textContent = <?= json_encode($csv_file) ?>;
+  document.getElementById('hdr-csv').textContent = CSV_LABEL;
   updateSetupUI();
 });
 
 function updateSetupUI() {
-  const total  = VOCAB.length;
-  const ngList = VOCAB.filter(v => progress[v.word]?.status === 'ng');
-  const okList = VOCAB.filter(v => progress[v.word]?.status === 'ok');
+  const stats = {
+    total: currentData.total_cards ?? currentData.cards.length,
+    learned: currentData.cards.filter(c => c.learned).length,
+    review_count: currentData.review_queue.length
+  };
 
   document.getElementById('setup-meta').textContent =
-    `全 ${total} 語 — ${<?= json_encode($csv_file) ?>}`;
+    `全 ${stats.total} 語 — ${CSV_LABEL}`;
 
-  // 統計ピル
   document.getElementById('setup-stats').innerHTML = `
-    <div class="stat-pill"><span class="n">${total}</span><br><span style="font-size:.72rem;color:var(--fog)">総語数</span></div>
-    <div class="stat-pill green"><span class="n">${okList.length}</span><br><span style="font-size:.72rem;color:var(--fog)">👍 覚えた</span></div>
-    <div class="stat-pill red-c"><span class="n">${ngList.length}</span><br><span style="font-size:.72rem;color:var(--fog)">❓ 要復習</span></div>
-    <div class="stat-pill"><span class="n">${total - okList.length - ngList.length}</span><br><span style="font-size:.72rem;color:var(--fog)">未学習</span></div>
+    <div class="stat-pill"><span class="n">${stats.total}</span><br><span style="font-size:.72rem;color:var(--fog)">総語数</span></div>
+    <div class="stat-pill green"><span class="n">${stats.learned}</span><br><span style="font-size:.72rem;color:var(--fog)">👍 覚えた</span></div>
+    <div class="stat-pill red-c"><span class="n">${stats.review_count}</span><br><span style="font-size:.72rem;color:var(--fog)">❓ 要復習</span></div>
+    <div class="stat-pill"><span class="n">${stats.total - stats.learned - stats.review_count}</span><br><span style="font-size:.72rem;color:var(--fog)">未学習</span></div>
   `;
 
-  // NGモードのカウント更新
-  document.getElementById('ng-count-sub').textContent = ngList.length + '語';
+  document.getElementById('ng-count-sub').textContent = stats.review_count + '語';
   const ngBtn = document.getElementById('mode-ng-btn');
-  if (ngList.length === 0) {
+  if (stats.review_count === 0) {
     ngBtn.style.opacity = '.4';
     ngBtn.style.pointerEvents = 'none';
-    if (selectedMode === 'ng') { selectedMode = 'order'; document.querySelector('[data-mode=order]').classList.add('selected'); ngBtn.classList.remove('selected'); }
+    if (selectedMode === 'review_only') {
+      selectedMode = 'order';
+      document.querySelector('[data-mode=order]').classList.add('selected');
+      ngBtn.classList.remove('selected');
+    }
   } else {
     ngBtn.style.opacity = '1';
     ngBtn.style.pointerEvents = '';
@@ -578,13 +560,11 @@ function selectMode(el) {
 
 function startStudy(mode) {
   const m = mode || selectedMode;
-  let cards = [...VOCAB];
+  let cards = getCardsForMode(m);
 
-  if (m === 'ng') {
-    cards = cards.filter(v => progress[v.word]?.status === 'ng');
-    if (cards.length === 0) return;
-  } else if (m === 'random') {
-    cards = shuffle(cards);
+  if (cards.length === 0) {
+    alert('学習するカードがありません。');
+    return;
   }
 
   deck      = cards;
@@ -592,15 +572,13 @@ function startStudy(mode) {
   sessionNG = 0;
   selectedMode = m;
 
-  // 続きから: lastIndex をモードごとに sessionStorage に保存・復元
-  const storageKey = `fc_last_${CSV_LABEL}_${m}`;
-  if (resumeMode && sessionStorage.getItem(storageKey)) {
-    const saved = parseInt(sessionStorage.getItem(storageKey), 10);
-    current = (saved < deck.length) ? saved : 0;
+  // 続きから処理
+  if (resumeMode) {
+    const savedIndex = currentData.last_index ?? 0;
+    current = Math.min(savedIndex, cards.length - 1);
   } else {
     current = 0;
   }
-  // reverseMode は呼び出し時点の値をそのまま引き継ぐ
 
   document.getElementById('setup-screen').style.display  = 'none';
   document.getElementById('result-screen').style.display = 'none';
@@ -609,10 +587,28 @@ function startStudy(mode) {
   renderCard();
 }
 
-function retryNG()  { startStudy('ng'); }
+function getCardsForMode(mode) {
+  let cards = [...currentData.cards];
+
+  if (mode === 'review_only') {
+    const reviewWords = new Set(currentData.review_queue);
+    cards = cards.filter(c => reviewWords.has(c.word));
+  }
+
+  if (mode === 'random') {
+    shuffle(cards);
+  }
+
+  return cards;
+}
+
+function retryNG()  { startStudy('review_only'); }
 function retryAll() { startStudy('random'); }
 
 function showSetup() {
+  // サーバーに session を保存
+  api('save_session', { mode: selectedMode, index: current });
+  
   document.getElementById('result-screen').style.display = 'none';
   document.getElementById('study-screen').style.display  = 'none';
   document.getElementById('setup-screen').style.display  = 'flex';
@@ -620,9 +616,9 @@ function showSetup() {
 }
 
 async function resetProgress() {
-  if (!confirm(`「${CSV_LABEL}」の学習履歴をリセットしますか？\n他のリストはリセットされません。`)) return;
+  if (!confirm(`「${CSV_LABEL}」の学習履歴をリセットしますか？`)) return;
   await api('reset', {});
-  progress = {};
+  currentData = await api('get_data', {});
   updateSetupUI();
 }
 
@@ -635,7 +631,6 @@ function renderCard() {
   const card = deck[current];
   isFlipped = false;
 
-  // reverseMode: 裏面からスタートの場合は最初から flipped 状態にする
   const wrap = document.getElementById('card-wrap');
   if (reverseMode) {
     wrap.classList.add('flipped');
@@ -644,20 +639,17 @@ function renderCard() {
     wrap.classList.remove('flipped');
   }
 
-  // コンテンツ更新（表裏ともセット）
   document.getElementById('front-word').textContent    = card.word;
   document.getElementById('back-meaning').textContent  = card.meaning;
   document.getElementById('back-chunk').textContent    = card.chunk ? `"${card.chunk}"` : '';
 
-  // ヒントテキスト切り替え
   const frontHint = document.getElementById('front-hint');
   if (frontHint) {
     frontHint.textContent = reverseMode
-      ? 'A / J = 覚えた · F = 要復習'
+      ? 'A / J = 覚えた · F = 要復習'
       : 'クリック / Space で裏返す';
   }
 
-  // ボタン状態: reverseMode なら最初から判定ボタンを有効に
   if (reverseMode) {
     document.getElementById('btn-ok').disabled   = false;
     document.getElementById('btn-ng').disabled   = false;
@@ -668,7 +660,6 @@ function renderCard() {
     document.getElementById('btn-flip').disabled = false;
   }
 
-  // カウンター・プログレスバー
   document.getElementById('counter').textContent = `${current + 1} / ${deck.length}`;
   document.getElementById('progress-fill').style.width = `${(current / deck.length) * 100}%`;
   document.getElementById('ok-count').textContent = sessionOK;
@@ -676,20 +667,15 @@ function renderCard() {
 }
 
 function flipCard() {
-  // 何度でも裏返せる（トグル）
   isFlipped = !isFlipped;
   const wrap = document.getElementById('card-wrap');
 
   if (isFlipped) {
-    // 裏面（日本語）を表示
     wrap.classList.add('flipped');
     document.getElementById('btn-ok').disabled = false;
     document.getElementById('btn-ng').disabled = false;
   } else {
-    // 表面（英語）を表示
     wrap.classList.remove('flipped');
-    // 通常モードで表に戻した場合は判定ボタンを無効に
-    // reverseMode では表に戻っても判定可能なまま
     if (!reverseMode) {
       document.getElementById('btn-ok').disabled = true;
       document.getElementById('btn-ng').disabled = true;
@@ -697,22 +683,23 @@ function flipCard() {
   }
 }
 
-async function markCard(status) {
+async function markCard(action) {
   if (document.getElementById('btn-ok').disabled && document.getElementById('btn-ng').disabled) return;
 
   const word = deck[current].word;
 
-  // サーバーに保存
-  await api('mark', { word, status });
-  progress[word] = { status, updated: new Date().toISOString() };
+  if (action === 'learned') {
+    await api('mark_learned', { word });
+    sessionOK++;
+  } else if (action === 'review') {
+    await api('mark_review', { word });
+    sessionNG++;
+  }
 
-  if (status === 'ok') sessionOK++;
-  else                  sessionNG++;
+  // ローカルデータも更新
+  currentData = await api('get_data', {});
 
   current++;
-  // 続きから用に現在位置を保存
-  const storageKey = `fc_last_${CSV_LABEL}_${selectedMode}`;
-  sessionStorage.setItem(storageKey, String(current));
   renderCard();
 }
 
@@ -731,7 +718,6 @@ function showResult() {
   document.getElementById('result-total').textContent = total;
   document.getElementById('progress-fill').style.width = '100%';
 
-  // 結果メッセージ
   let icon = '🎉', title = 'パーフェクト！';
   if (rate < 100 && rate >= 80) { icon = '😊'; title = 'よくできました！'; }
   else if (rate < 80 && rate >= 60) { icon = '📚'; title = 'もう少し！'; }
@@ -739,8 +725,7 @@ function showResult() {
   document.getElementById('result-icon').textContent  = icon;
   document.getElementById('result-title').textContent = `${title} (${rate}%)`;
 
-  // NG一覧
-  const ngWords = deck.filter(v => progress[v.word]?.status === 'ng');
+  const ngWords = deck.filter(v => currentData.cards.find(c => c.word === v.word && c.need_review));
   const ngListEl = document.getElementById('ng-list');
   if (ngWords.length > 0) {
     ngListEl.style.display = 'block';
@@ -758,25 +743,22 @@ function showResult() {
    キーボード操作
 ═══════════════════════════════════════════════ */
 document.addEventListener('keydown', e => {
-  // 入力フォーム内は無視
   if (['INPUT','TEXTAREA','SELECT','BUTTON'].includes(e.target.tagName)) return;
-
-  // 学習画面のみ有効
   if (document.getElementById('study-screen').style.display !== 'flex') return;
 
   if (e.code === 'Space') {
     e.preventDefault();
     flashBtn('btn-flip');
-    flipCard(); // 何度でもトグル可能
+    flipCard();
   } else if (e.key === 'a' || e.key === 'A' || e.key === 'j' || e.key === 'J') {
     if (!document.getElementById('btn-ok').disabled) {
       flashBtn('btn-ok');
-      markCard('ok');
+      markCard('learned');
     }
   } else if (e.key === 'f' || e.key === 'F') {
     if (!document.getElementById('btn-ng').disabled) {
       flashBtn('btn-ng');
-      markCard('ng');
+      markCard('review');
     }
   }
 });
@@ -810,13 +792,12 @@ async function api(action, params) {
   }
 }
 
-// CSVが空の場合の表示
-if (VOCAB.length === 0) {
+if (currentData.cards.length === 0) {
   document.getElementById('setup-screen').innerHTML = `
     <div class="empty-state">
       <span class="icon">📭</span>
       <p style="font-family:'Playfair Display',serif;font-size:1.1rem;color:var(--mist);margin-bottom:.5rem">CSVファイルが見つかりません</p>
-      <p style="color:var(--fog);font-size:.88rem">同じディレクトリに <code style="color:var(--gold)">${<?= json_encode($csv_file) ?>}</code> を配置してください。</p>
+      <p style="color:var(--fog);font-size:.88rem">同じディレクトリに <code style="color:var(--gold)">${CSV_LABEL}</code> を配置してください。</p>
       <p style="margin-top:1rem"><a href="/index.php" style="color:var(--gold)">← トップに戻る</a></p>
     </div>`;
 }
