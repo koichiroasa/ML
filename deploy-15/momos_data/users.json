@@ -1,0 +1,32 @@
+[
+  {
+    "uid": "20240001",
+    "name": "山田 花子",
+    "role": "student",
+    "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"
+  },
+  {
+    "uid": "20240002",
+    "name": "佐藤 太郎",
+    "role": "student",
+    "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"
+  },
+  {
+    "uid": "20240003",
+    "name": "鈴木 一郎",
+    "role": "free",
+    "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"
+  },
+  {
+    "uid": "T001",
+    "name": "田中 先生",
+    "role": "teacher",
+    "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"
+  },
+  {
+    "uid": "T002",
+    "name": "中村 先生",
+    "role": "teacher",
+    "password": "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi"
+  }
+]
